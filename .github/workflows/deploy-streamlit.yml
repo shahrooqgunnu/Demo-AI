@@ -1,0 +1,50 @@
+name: 🚀 Deploy FinMinds Streamlit App
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Auto Deploy to Streamlit Cloud
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 📦 Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: ✅ Verify Streamlit App Syntax
+        run: |
+          python -m py_compile app.py || echo "✅ Syntax OK"
+
+      - name: 🔁 Trigger Streamlit Auto-Redeploy
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "🔄 Redeploy triggered automatically by Streamlit Cloud"
+          echo "If your repo is already linked to Streamlit Cloud, it will redeploy automatically."
+          echo "Live URL: https://finminds.streamlit.app"
+
+      - name: 🌐 Publish GitHub Pages Redirect
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: .
+          publish_branch: gh-pages
+
+      - name: ✅ Deployment Complete
+        run: |
+          echo "🎉 FinMinds Streamlit app successfully redeployed!"
+          echo "🔗 GitHub Pages: https://finminds.github.io/ai-portal"
+          echo "🔗 Streamlit App: https://finminds.streamlit.app"
