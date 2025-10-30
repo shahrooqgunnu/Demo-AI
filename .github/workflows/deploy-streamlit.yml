@@ -6,6 +6,9 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: write    # 👈 allows pushing to gh-pages branch
+
 jobs:
   deploy:
     name: Auto Deploy to Streamlit Cloud
