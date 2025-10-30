@@ -1,4 +1,4 @@
-name: 🚀 Deploy FinMinds Streamlit App
+name: 🚀 Deploy Streamlit AI Portal to GitHub Pages
 
 on:
   push:
@@ -7,47 +7,38 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write    # 👈 allows pushing to gh-pages branch
+  contents: write
+  pages: write
+  id-token: write
 
 jobs:
-  deploy:
-    name: Auto Deploy to Streamlit Cloud
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📥 Checkout Repository
+      - name: 🛎️ Checkout Repository
         uses: actions/checkout@v4
 
       - name: 🐍 Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.10'
 
       - name: 📦 Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install streamlit boto3 pandas plotly python-dotenv langchain-openai
 
-      - name: ✅ Verify Streamlit App Syntax
+      - name: 🏗️ Build static Streamlit export
         run: |
-          python -m py_compile app.py || echo "✅ Syntax OK"
+          mkdir -p dist
+          cp -r app.py dist/
+          echo "<meta http-equiv='refresh' content='0; url=https://shahrooqgunnu.github.io/Demo-AI/' />" > dist/index.html
 
-      - name: 🔁 Trigger Streamlit Auto-Redeploy
-        if: github.ref == 'refs/heads/main'
-        run: |
-          echo "🔄 Redeploy triggered automatically by Streamlit Cloud"
-          echo "If your repo is already linked to Streamlit Cloud, it will redeploy automatically."
-          echo "Live URL: https://finminds.streamlit.app"
-
-      - name: 🌐 Publish GitHub Pages Redirect
+      - name: 🚀 Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: .
+          publish_dir: ./dist
           publish_branch: gh-pages
-
-      - name: ✅ Deployment Complete
-        run: |
-          echo "🎉 FinMinds Streamlit app successfully redeployed!"
-          echo "🔗 GitHub Pages: https://finminds.github.io/ai-portal"
-          echo "🔗 Streamlit App: https://finminds.streamlit.app"
+          force_orphan: true
