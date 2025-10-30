@@ -192,44 +192,26 @@ def get_service_costs():
 def process_query(q: str):
     ql = q.lower()
 
-    if "rds" in ql:
-        rds = list_rds()
-        if not rds:
-            return "🚫 No active RDS instances found."
-        st.markdown("### 🧩 Active RDS Instances")
-        st.dataframe(pd.DataFrame(rds))
-        return f"✅ Found {len(rds)} RDS instances."
-
-    elif "dynamodb" in ql:
-        tables = list_dynamodb()
-        return f"🧮 DynamoDB Tables ({len(tables)}):\n" + ("\n".join(tables) if tables else "No DynamoDB tables found.")
-
-    elif "ecr" in ql or "container" in ql or "repository" in ql:
-        repos = list_ecr()
-        return f"📦 ECR Repositories ({len(repos)}):\n" + ("\n".join(repos) if repos else "No ECR repositories found.")
-
-    elif "iam" in ql or "user" in ql:
-        users = list_iam_users()
-        return f"👤 IAM Users ({len(users)}):\n" + ("\n".join(users) if users else "No IAM users found.")
-
-    elif "ec2" in ql:
+    # ---------- AWS DATA QUERIES ----------
+    if "ec2" in ql and any(w in ql for w in ["list", "show", "running", "instances"]):
         ec2s = list_ec2()
-        return f"🖥️ EC2 Instances ({len(ec2s)}):\n" + ("\n".join(ec2s) if ec2s else "No EC2 instances running.")
+        return f"🖥️ **EC2 Instances ({len(ec2s)})**:\n" + ("\n".join(ec2s) if ec2s else "No EC2 instances running.")
 
-    elif "s3" in ql:
+    elif "s3" in ql and any(w in ql for w in ["list", "show", "buckets"]):
         s3s = list_s3()
-        return f"🪣 S3 Buckets ({len(s3s)}):\n" + ("\n".join(s3s) if s3s else "No S3 buckets found.")
+        return f"🪣 **S3 Buckets ({len(s3s)})**:\n" + ("\n".join(s3s) if s3s else "No S3 buckets found.")
 
-    elif "lambda" in ql:
-        l = list_lambda()
-        return f"⚙️ Lambda Functions ({len(l)}):\n" + ("\n".join(l) if l else "No Lambda functions deployed.")
+    elif "lambda" in ql and any(w in ql for w in ["list", "functions", "show"]):
+        lambdas = list_lambda()
+        return f"⚙️ **Lambda Functions ({len(lambdas)})**:\n" + ("\n".join(lambdas) if lambdas else "No Lambda functions deployed.")
 
-    elif "cost" in ql or "bill" in ql or "spend" in ql:
+    elif any(word in ql for word in ["cost", "bill", "spend", "charges", "pricing"]):
         df = get_monthly_costs()
         df_service = get_service_costs()
 
-        if len(df) >= 2:
-            current, previous = df["Cost"].iloc[-1], df["Cost"].iloc[-2]
+        if not df.empty:
+            current = df["Cost"].iloc[-1]
+            previous = df["Cost"].iloc[-2] if len(df) > 1 else 0
             diff = current - previous
             trend = "📈 increased" if diff > 0 else "📉 decreased"
             st.markdown(f"### 💰 AWS Cost Summary")
@@ -237,29 +219,52 @@ def process_query(q: str):
 
         st.markdown("### 🧩 Service-wise Cost Breakdown")
         st.plotly_chart(px.bar(df_service, x="Service", y="Cost", title="AWS Service Cost Breakdown"), use_container_width=True)
+
         st.markdown("### 📊 Monthly Cost Trend")
-        st.plotly_chart(px.line(df, x="Month", y="Cost", markers=True, title="AWS Monthly Cost (Last 6 Months)"), use_container_width=True)
+        st.plotly_chart(px.line(df, x="Month", y="Cost", markers=True, title="AWS Monthly Cost (6 Months)"), use_container_width=True)
         return ""
 
-    elif any(word in ql for word in ["list services", "using services", "active services", "currently using", "which services"]):
-        ec2s, s3s, lambdas, rds, dynamo, ecr, iam = list_ec2(), list_s3(), list_lambda(), list_rds(), list_dynamodb(), list_ecr(), list_iam_users()
+    elif any(word in ql for word in ["list services", "using services", "active services", "which services"]):
+        ec2s, s3s, lambdas = list_ec2(), list_s3(), list_lambda()
         summary = [
-            f"🖥️ EC2: {len(ec2s)}",
-            f"🪣 S3: {len(s3s)}",
-            f"⚙️ Lambda: {len(lambdas)}",
-            f"🧩 RDS: {len(rds)}",
-            f"🧮 DynamoDB: {len(dynamo)}",
-            f"📦 ECR: {len(ecr)}",
-            f"👤 IAM Users: {len(iam)}"
+            f"🖥️ EC2 Instances: {len(ec2s)}",
+            f"🪣 S3 Buckets: {len(s3s)}",
+            f"⚙️ Lambda Functions: {len(lambdas)}"
         ]
         return "### 🔍 Active AWS Services Summary\n" + "\n".join(summary)
 
-    else:
+    # ---------- HOW-TO / SETUP QUESTIONS ----------
+    elif any(w in ql for w in ["how to", "create", "setup", "steps", "launch"]):
         res = llm.invoke([
-            SystemMessage(content="You are an AWS assistant with access to EC2, S3, Lambda, RDS, DynamoDB, ECR, IAM, and cost data."),
+            SystemMessage(content="""You are a friendly AWS assistant.
+Your job is to give **step-by-step**, beginner-friendly instructions for AWS tasks (like creating EC2, S3, Lambda, IAM users, etc.).
+Use clear markdown formatting, short paragraphs, and emojis.
+Example style:
+
+### 🧩 Steps to Create an S3 Bucket
+1. Go to AWS Console → Search for **S3**
+2. Click **Create Bucket**
+3. Enter a unique bucket name
+4. Choose region
+5. Leave defaults or enable versioning if needed
+6. Click **Create bucket**
+
+💡 Tip: You can also use AWS CLI:  
+```bash
+aws s3 mb s3://my-new-bucket
+```"""),
             HumanMessage(content=q)
         ])
         return res.content
+
+    # ---------- DEFAULT (GENERAL CHAT) ----------
+    else:
+        res = llm.invoke([
+            SystemMessage(content="You are an AWS + Cloud expert assistant that can explain, troubleshoot, and guide users using AWS best practices."),
+            HumanMessage(content=q)
+        ])
+        return res.content
+
 
 # ---------------------- SIDEBAR NAV ----------------------
 page = st.sidebar.radio("Navigation", ["🏠 Home", "💬 Chat Assistant", "📊 Cost Insights"])
