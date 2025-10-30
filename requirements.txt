@@ -1,0 +1,9 @@
+streamlit
+langchain
+openai
+python-dotenv
+plotly
+pandas
+boto3==1.35.10
+langchain-openai
+langchain-core

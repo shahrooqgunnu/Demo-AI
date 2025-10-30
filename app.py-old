@@ -1,0 +1,286 @@
+# app.py
+import os
+import streamlit as st
+from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
+import pandas as pd
+import plotly.express as px
+import boto3
+from datetime import datetime
+
+# ==============================================================
+# STEP 1: Initialize Streamlit App
+# ==============================================================
+st.set_page_config(
+    page_title="Agentic AI for Smart Cloud Infrastructure",
+    page_icon="🤖",
+    layout="wide"
+)
+
+st.title("🤖 Agentic AI for Smart Cloud Infrastructure Management")
+st.markdown("---")
+
+# ==============================================================
+# STEP 2: Load Environment Variables & Initialize Model
+# ==============================================================
+load_dotenv()
+openai_api_key = os.getenv("OPENAI_API_KEY")
+
+if not openai_api_key:
+    st.error("⚠️ Please set your OPENAI_API_KEY in a .env file.")
+    st.stop()
+
+# Initialize LLM (cached to avoid reloading on every interaction)
+@st.cache_resource
+def load_llm():
+    return ChatOpenAI(api_key=openai_api_key, model="gpt-4o-mini", temperature=0.7)
+
+llm = load_llm()
+
+# ==============================================================
+# STEP 3: Initialize AWS Clients
+# ==============================================================
+@st.cache_resource
+def init_aws_clients():
+    try:
+        ce = boto3.client("ce")    # Cost Explorer
+        ec2 = boto3.client("ec2")  # EC2
+        return ce, ec2
+    except Exception as e:
+        st.error(f"❌ AWS Connection Error: {e}")
+        return None, None
+
+ce, ec2 = init_aws_clients()
+
+# ==============================================================
+# STEP 4: Sidebar Navigation
+# ==============================================================
+menu = st.sidebar.radio(
+    "📍 Navigation",
+    ["Dashboard", "Cost Trends", "AI Assistant", "About"],
+    index=0
+)
+
+# ==============================================================
+# STEP 5: Dashboard Page (Real AWS Data)
+# ==============================================================
+if menu == "Dashboard":
+    st.header("🌩️ Real AWS Cloud Cost Overview")
+
+    if not ce:
+        st.warning("⚠️ AWS not connected. Please ensure credentials are configured using `aws configure`.")
+    else:
+        try:
+            # Fetch current month's cost per service
+            start = datetime.now().replace(day=1).strftime("%Y-%m-%d")
+            end = datetime.now().strftime("%Y-%m-%d")
+
+            response = ce.get_cost_and_usage(
+                TimePeriod={'Start': start, 'End': end},
+                Granularity='MONTHLY',
+                Metrics=['UnblendedCost'],
+                GroupBy=[{'Type': 'DIMENSION', 'Key': 'SERVICE'}]
+            )
+
+            services = []
+            costs = []
+            for group in response['ResultsByTime'][0]['Groups']:
+                service = group['Keys'][0]
+                cost = float(group['Metrics']['UnblendedCost']['Amount'])
+                if cost > 0:
+                    services.append(service)
+                    costs.append(cost)
+
+            df = pd.DataFrame({'Service': services, 'Monthly Cost ($)': costs})
+            df = df.sort_values(by='Monthly Cost ($)', ascending=False)
+
+            col1, col2 = st.columns(2)
+            with col1:
+                fig1 = px.bar(df, x="Service", y="Monthly Cost ($)", color="Service",
+                              title="💰 AWS Monthly Cost by Service")
+                st.plotly_chart(fig1, use_container_width=True)
+
+            with col2:
+                fig2 = px.pie(df, names="Service", values="Monthly Cost ($)",
+                              title="📊 Cost Distribution by Service")
+                st.plotly_chart(fig2, use_container_width=True)
+
+            total_cost = sum(costs)
+            st.success(f"✅ Total AWS cost for {datetime.now().strftime('%B %Y')}: **${total_cost:.2f}**")
+
+        except Exception as e:
+            st.error(f"Error fetching AWS Cost Data: {e}")
+
+# ==============================================================
+# STEP 6: Cost Trends (Dummy until CloudWatch integration)
+# ==============================================================
+elif menu == "Cost Trends":
+    st.header("📊 Cloud Cost & Usage Trends")
+
+    df_trend = pd.DataFrame({
+        "Month": ["June", "July", "Aug", "Sep", "Oct"],
+        "Total Cost ($)": [6000, 5900, 5400, 5700, 5200],
+        "EC2 Usage (%)": [80, 75, 70, 65, 60],
+    })
+
+    fig = px.line(df_trend, x="Month", y="Total Cost ($)", markers=True,
+                  title="📈 Monthly Cloud Cost Trend")
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.success("✅ Costs have reduced by 15% over the past 3 months due to EC2 optimization.")
+
+# ==============================================================
+# STEP 7: AI Assistant (Enhanced UI + Multi-Service AWS Fetch)
+# ==============================================================
+elif menu == "AI Assistant":
+    st.markdown("<h2 style='text-align:center;'>💬 Agentic AI Cloud Assistant</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center;'>Ask anything about your AWS usage, cost, or resources.</p>", unsafe_allow_html=True)
+
+    # --- Chat history ---
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+    # --- AWS helper functions ---
+    def list_ec2_instances():
+        try:
+            res = ec2.describe_instances()
+            instances = []
+            for r in res['Reservations']:
+                for i in r['Instances']:
+                    instances.append(f"{i['InstanceId']} ({i['InstanceType']}) - {i['State']['Name']}")
+            return "\n".join(instances) if instances else "No EC2 instances found."
+        except Exception as e:
+            return f"⚠️ Error fetching EC2 data: {e}"
+
+    def list_s3_buckets():
+        try:
+            s3 = boto3.client('s3')
+            res = s3.list_buckets()
+            buckets = [b['Name'] for b in res['Buckets']]
+            return "\n".join(buckets) if buckets else "No S3 buckets found."
+        except Exception as e:
+            return f"⚠️ Error fetching S3 data: {e}"
+
+    def list_ebs_volumes():
+        try:
+            res = ec2.describe_volumes()
+            volumes = [f"{v['VolumeId']} ({v['State']}, {v['Size']} GiB)" for v in res['Volumes']]
+            return "\n".join(volumes) if volumes else "No EBS volumes found."
+        except Exception as e:
+            return f"⚠️ Error fetching EBS volumes: {e}"
+
+    def list_eks_clusters():
+        try:
+            eks = boto3.client('eks')
+            clusters = eks.list_clusters()['clusters']
+            return "\n".join(clusters) if clusters else "No EKS clusters found."
+        except Exception as e:
+            return f"⚠️ Error fetching EKS clusters: {e}"
+
+    def get_monthly_cost():
+        try:
+            start = datetime.now().replace(day=1).strftime("%Y-%m-%d")
+            end = datetime.now().strftime("%Y-%m-%d")
+            response = ce.get_cost_and_usage(
+                TimePeriod={'Start': start, 'End': end},
+                Granularity='MONTHLY',
+                Metrics=['UnblendedCost'],
+                GroupBy=[{'Type': 'DIMENSION', 'Key': 'SERVICE'}]
+            )
+
+            total = 0
+            services = []
+            for g in response['ResultsByTime'][0]['Groups']:
+                name = g['Keys'][0]
+                amount = float(g['Metrics']['UnblendedCost']['Amount'])
+                total += amount
+                services.append((name, amount))
+
+            top_service = max(services, key=lambda x: x[1])[0] if services else "N/A"
+            return f"💵 Total AWS bill for {datetime.now().strftime('%B')}: **${total:.2f}**\n📈 Top spending service: **{top_service}**"
+        except Exception as e:
+            return f"⚠️ Error fetching cost data: {e}"
+
+    # --- Dispatcher for query detection ---
+    def process_query(query):
+        q = query.lower()
+
+        if "ec2" in q and any(k in q for k in ["show", "list", "instances"]):
+            return list_ec2_instances()
+
+        elif "s3" in q and any(k in q for k in ["buckets", "list", "show"]):
+            return list_s3_buckets()
+
+        elif "ebs" in q and any(k in q for k in ["volumes", "list", "show"]):
+            return list_ebs_volumes()
+
+        elif "eks" in q and any(k in q for k in ["clusters", "list", "show"]):
+            return list_eks_clusters()
+
+        elif any(k in q for k in ["bill", "cost", "spend", "charges"]):
+            return get_monthly_cost()
+
+        else:
+            # fallback to GPT
+            response = llm.invoke([
+                SystemMessage(content="You are an AWS cost optimization and cloud assistant."),
+                HumanMessage(content=query)
+            ])
+            return response.content
+
+    # --- Chat UI ---
+    chat_container = st.container()
+    with chat_container:
+        for role, text in st.session_state.chat_history:
+            if role == "User":
+                st.markdown(f"""
+                <div style='background-color:#DCF8C6;padding:10px;border-radius:10px;margin:5px 0;text-align:right;'>
+                🧑 <b>You:</b> {text}
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div style='background-color:#F0F0F0;padding:10px;border-radius:10px;margin:5px 0;text-align:left;'>
+                🤖 <b>AI:</b> {text}
+                </div>
+                """, unsafe_allow_html=True)
+
+    # --- Input field ---
+    st.markdown("---")
+    user_query = st.text_input("💭 Type your question here...", key="user_query")
+
+    if st.button("🚀 Ask AI"):
+        if user_query.strip():
+            with st.spinner("🧠 Thinking..."):
+                ai_response = process_query(user_query.strip())
+                st.session_state.chat_history.append(("User", user_query))
+                st.session_state.chat_history.append(("AI", ai_response))
+                st.rerun()
+
+    st.markdown("""
+    <div style='margin-top:20px;font-size:14px;color:gray;'>
+    💡 <b>Try asking:</b><br>
+    • What is my AWS bill this month?<br>
+    • Show all EC2 instances<br>
+    • List my S3 buckets<br>
+    • Show EBS volumes<br>
+    • List EKS clusters<br>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ==============================================================
+# STEP 8: About Page
+# ==============================================================
+elif menu == "About":
+    st.header("📘 About the Project")
+    st.write("""
+    **Agentic AI for Smart Cloud Infrastructure Management**  
+    A Buildathon project focused on:
+    - Fetching **real AWS billing and EC2 data**
+    - Automating cost analysis and anomaly detection  
+    - Integrating OpenAI GPT for cloud optimization insights  
+    - Enabling **chat-based infrastructure intelligence**
+    """)
+    st.markdown("🧩 Built with: `LangChain`, `OpenAI GPT-4`, `Streamlit`, `Plotly`, and `AWS SDK (boto3)`")

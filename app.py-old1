@@ -1,0 +1,231 @@
+# app.py
+import os
+import time
+import streamlit as st
+import boto3
+from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
+from datetime import datetime, timedelta
+
+# ==============================================================
+# STEP 1: Streamlit Configuration
+# ==============================================================
+st.set_page_config(page_title="Agentic AI for AWS", page_icon="☁️", layout="wide")
+
+st.markdown("""
+<style>
+    .chat-container {
+        max-height: 550px;
+        overflow-y: auto;
+        padding: 10px;
+        background-color: #f9f9fb;
+        border-radius: 10px;
+        border: 1px solid #ddd;
+        display: flex;
+        flex-direction: column-reverse;
+    }
+    .user-msg, .ai-msg {
+        padding: 10px 14px;
+        border-radius: 12px;
+        margin-bottom: 10px;
+        max-width: 80%;
+        word-wrap: break-word;
+        animation: fadeIn 0.3s ease-in;
+    }
+    .user-msg {
+        background-color: #DCF8C6;
+        align-self: flex-end;
+    }
+    .ai-msg {
+        background-color: #E6E6E6;
+        align-self: flex-start;
+    }
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🤖 Agentic AI for Smart AWS Cloud Management")
+st.markdown("---")
+
+# ==============================================================
+# STEP 2: Environment Variables
+# ==============================================================
+load_dotenv()
+
+aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
+aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+aws_region = os.getenv("AWS_REGION") or "us-east-1"
+openai_api_key = os.getenv("OPENAI_API_KEY")
+
+if not all([aws_access_key, aws_secret_key, openai_api_key]):
+    st.error("⚠️ Missing environment variables. Please configure .env file correctly.")
+    st.stop()
+
+# ==============================================================
+# STEP 3: Initialize AI and AWS Clients
+# ==============================================================
+@st.cache_resource
+def load_llm():
+    return ChatOpenAI(api_key=openai_api_key, model="gpt-4o-mini", temperature=0.5)
+
+@st.cache_resource
+def aws_clients():
+    return {
+        "ec2": boto3.client("ec2",
+                            aws_access_key_id=aws_access_key,
+                            aws_secret_access_key=aws_secret_key,
+                            region_name=aws_region),
+        "s3": boto3.client("s3",
+                           aws_access_key_id=aws_access_key,
+                           aws_secret_access_key=aws_secret_key,
+                           region_name=aws_region),
+        "rds": boto3.client("rds",
+                            aws_access_key_id=aws_access_key,
+                            aws_secret_access_key=aws_secret_key,
+                            region_name=aws_region),
+        "lambda": boto3.client("lambda",
+                               aws_access_key_id=aws_access_key,
+                               aws_secret_access_key=aws_secret_key,
+                               region_name=aws_region),
+        "eks": boto3.client("eks",
+                            aws_access_key_id=aws_access_key,
+                            aws_secret_access_key=aws_secret_key,
+                            region_name=aws_region),
+        "ce": boto3.client("ce",
+                           aws_access_key_id=aws_access_key,
+                           aws_secret_access_key=aws_secret_key,
+                           region_name="us-east-1")  # cost explorer only supports us-east-1
+    }
+
+llm = load_llm()
+clients = aws_clients()
+
+# ==============================================================
+# STEP 4: AWS Functions
+# ==============================================================
+def get_ec2_instances():
+    ec2 = clients["ec2"]
+    data = []
+    for res in ec2.describe_instances()["Reservations"]:
+        for i in res["Instances"]:
+            data.append(f"💻 {i['InstanceId']} ({i['InstanceType']}) - {i['State']['Name']}")
+    return data
+
+def get_s3_buckets():
+    s3 = clients["s3"]
+    return [f"🪣 {b['Name']}" for b in s3.list_buckets()["Buckets"]]
+
+def get_rds_instances():
+    rds = clients["rds"]
+    return [f"🗄️ {db['DBInstanceIdentifier']}" for db in rds.describe_db_instances()["DBInstances"]]
+
+def get_lambda_functions():
+    lam = clients["lambda"]
+    return [f"⚙️ {f['FunctionName']}" for f in lam.list_functions()["Functions"]]
+
+def get_eks_clusters():
+    eks = clients["eks"]
+    return [f"☸️ {c}" for c in eks.list_clusters().get("clusters", [])]
+
+def get_cost_last_month():
+    ce = clients["ce"]
+    end = datetime.utcnow().replace(day=1)
+    start = (end - timedelta(days=31)).replace(day=1)
+    res = ce.get_cost_and_usage(
+        TimePeriod={"Start": start.strftime("%Y-%m-%d"), "End": end.strftime("%Y-%m-%d")},
+        Granularity="MONTHLY",
+        Metrics=["UnblendedCost"]
+    )
+    return float(res["ResultsByTime"][0]["Total"]["UnblendedCost"]["Amount"])
+
+# ==============================================================
+# STEP 5: Animated Typing Function
+# ==============================================================
+def animated_response(text):
+    placeholder = st.empty()
+    msg = ""
+    for char in text:
+        msg += char
+        placeholder.markdown(f"<div class='ai-msg'>{msg}▌</div>", unsafe_allow_html=True)
+        time.sleep(0.01)
+    placeholder.markdown(f"<div class='ai-msg'>{msg}</div>", unsafe_allow_html=True)
+
+# ==============================================================
+# STEP 6: Navigation
+# ==============================================================
+menu = st.sidebar.radio("📍 Navigation", ["Dashboard", "AI Assistant", "About"], index=1)
+
+# ==============================================================
+# STEP 7: AI Assistant Chat
+# ==============================================================
+if menu == "AI Assistant":
+    st.header("💬 Agentic AI Assistant")
+    st.caption("Ask anything about your AWS account: EC2, S3, RDS, Lambda, EKS, or costs.")
+
+    if "chat" not in st.session_state:
+        st.session_state.chat = []
+
+    query = st.text_input("💭 Type your question:")
+
+    if st.button("Ask"):
+        query_lower = query.lower()
+        try:
+            if "ec2" in query_lower:
+                response = "\n".join(get_ec2_instances()) or "No EC2 instances found."
+            elif "s3" in query_lower:
+                response = "\n".join(get_s3_buckets()) or "No S3 buckets found."
+            elif "rds" in query_lower:
+                response = "\n".join(get_rds_instances()) or "No RDS databases found."
+            elif "lambda" in query_lower:
+                response = "\n".join(get_lambda_functions()) or "No Lambda functions found."
+            elif "eks" in query_lower:
+                response = "\n".join(get_eks_clusters()) or "No EKS clusters found."
+            elif "cost" in query_lower or "bill" in query_lower:
+                cost = get_cost_last_month()
+                response = f"💰 Your AWS bill for last month: **${cost:.2f}**"
+            else:
+                ai_response = llm.invoke([
+                    SystemMessage(content="You are an AWS management assistant."),
+                    HumanMessage(content=query)
+                ])
+                response = ai_response.content
+        except Exception as e:
+            response = f"⚠️ Error: {str(e)}"
+
+        st.session_state.chat.append(("🧑 You", query))
+        st.session_state.chat.append(("🤖 AI", response))
+
+    st.markdown("<div class='chat-container'>", unsafe_allow_html=True)
+    for role, msg in reversed(st.session_state.chat):
+        if role == "🧑 You":
+            st.markdown(f"<div class='user-msg'>{msg}</div>", unsafe_allow_html=True)
+        else:
+            animated_response(msg)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ==============================================================
+# STEP 8: Dashboard
+# ==============================================================
+elif menu == "Dashboard":
+    st.header("📊 AWS Resource Summary")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("EC2 Instances", len(get_ec2_instances()))
+    col2.metric("S3 Buckets", len(get_s3_buckets()))
+    col3.metric("Lambda Functions", len(get_lambda_functions()))
+    st.success("✅ Live AWS data loaded successfully!")
+
+# ==============================================================
+# STEP 9: About
+# ==============================================================
+else:
+    st.header("📘 About")
+    st.write("""
+    This app uses **Agentic AI + AWS SDK (boto3)** + **LangChain** to:
+    - Fetch **live AWS data**
+    - Provide **AI-powered chat** with animated ChatGPT-style UI
+    - Support **multi-service insight** (EC2, S3, RDS, EKS, Lambda, Cost Explorer)
+    """)

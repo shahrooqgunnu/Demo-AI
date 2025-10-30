@@ -1,0 +1,441 @@
+# app.py
+import os
+import time
+import json
+import streamlit as st
+import boto3
+import pandas as pd
+import plotly.express as px
+from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
+
+# LangChain OpenAI wrapper used earlier in your project
+# If you prefer openai.ChatCompletion directly, swap this block accordingly.
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
+
+# ----------------------------
+# Config & env
+# ----------------------------
+load_dotenv()
+
+AWS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_REGION = os.getenv("AWS_REGION") or "us-east-1"   # default
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+
+if not all([AWS_KEY, AWS_SECRET, OPENAI_KEY]):
+    st.error("Missing environment variables - set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, OPENAI_API_KEY in .env")
+    st.stop()
+
+# ----------------------------
+# Streamlit page config + dark CSS
+# ----------------------------
+st.set_page_config(page_title="Agentic AI for AWS — Dark", layout="wide", initial_sidebar_state="expanded")
+
+# Dark theme CSS and chat styling
+st.markdown(
+    """
+    <style>
+    :root {
+      --bg: #0b1220;
+      --card: #0f1724;
+      --muted: #94a3b8;
+      --accent: linear-gradient(90deg,#7c3aed,#06b6d4);
+      --glass: rgba(255,255,255,0.03);
+    }
+    html, body, [class*="css"]  {
+      background: var(--bg);
+      color: #e6eef8;
+    }
+    .sidebar .sidebar-content {
+      background: linear-gradient(180deg,#041021,#071226);
+      color: #cbd5e1;
+    }
+    .card {
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 4px 18px rgba(2,6,23,0.6);
+      margin-bottom: 14px;
+    }
+    .metrics-row { display:flex; gap:12px; }
+    .metric {
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+      border-radius:10px; padding:12px; flex:1;
+      border-left: 4px solid rgba(255,255,255,0.03);
+    }
+    /* Chat */
+    .chat-wrap {
+      background: var(--glass);
+      border-radius: 14px;
+      padding: 12px;
+      height: 520px;
+      overflow-y: auto;
+      display:flex;
+      flex-direction:column-reverse;
+      border: 1px solid rgba(255,255,255,0.04);
+    }
+    .user-bubble {
+      background: linear-gradient(90deg,#064e3b,#10b981);
+      color: white;
+      padding:10px 14px; border-radius: 14px; margin:8px 0; max-width:80%; align-self:flex-end;
+      box-shadow: 0 6px 18px rgba(16,185,129,0.08);
+    }
+    .ai-bubble {
+      background: linear-gradient(90deg,#0ea5e9,#7c3aed);
+      color: #021124;
+      padding:10px 14px; border-radius: 14px; margin:8px 0; max-width:80%; align-self:flex-start;
+      box-shadow: 0 6px 18px rgba(124,58,237,0.06);
+    }
+    .small-muted { color: var(--muted); font-size:13px; margin-top:6px }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Title/header
+st.markdown("<h1 style='color:#e6eef8'>Agentic AI for Smart AWS Cloud Management</h1>", unsafe_allow_html=True)
+st.markdown("<div class='small-muted'>Dark theme • Live AWS integration • ChatGPT-like assistant</div>", unsafe_allow_html=True)
+st.markdown("---")
+
+# ----------------------------
+# Init LLM & AWS clients
+# ----------------------------
+@st.cache_resource
+def init_llm():
+    return ChatOpenAI(api_key=OPENAI_KEY, model="gpt-4o-mini", temperature=0.2)
+
+@st.cache_resource
+def init_aws_clients():
+    session = boto3.Session(
+        aws_access_key_id=AWS_KEY,
+        aws_secret_access_key=AWS_SECRET,
+        region_name=AWS_REGION
+    )
+    # Note: Cost Explorer is only available in us-east-1
+    ce = session.client("ce", region_name="us-east-1")
+    return {
+        "session": session,
+        "ec2": session.client("ec2"),
+        "s3": session.client("s3"),
+        "rds": session.client("rds"),
+        "lambda": session.client("lambda"),
+        "eks": session.client("eks"),
+        "ce": ce
+    }
+
+llm = init_llm()
+clients = init_aws_clients()
+
+# ----------------------------
+# AWS fetch functions (safe, small)
+# ----------------------------
+def safe_call(fn, default=None):
+    try:
+        return fn()
+    except Exception as e:
+        return default if default is not None else f"⚠️ {e}"
+
+def list_ec2():
+    def _():
+        out = []
+        resp = clients["ec2"].describe_instances()
+        for r in resp.get("Reservations", []):
+            for i in r.get("Instances", []):
+                out.append({
+                    "id": i.get("InstanceId"),
+                    "type": i.get("InstanceType"),
+                    "state": i.get("State", {}).get("Name"),
+                    "launch": str(i.get("LaunchTime"))
+                })
+        return out
+    return safe_call(_ , [])
+
+def list_s3():
+    def _():
+        resp = clients["s3"].list_buckets()
+        return [b["Name"] for b in resp.get("Buckets", [])]
+    return safe_call(_, [])
+
+def list_rds():
+    def _():
+        resp = clients["rds"].describe_db_instances()
+        return [db["DBInstanceIdentifier"] for db in resp.get("DBInstances", [])]
+    return safe_call(_, [])
+
+def list_lambda():
+    def _():
+        resp = clients["lambda"].list_functions()
+        return [f["FunctionName"] for f in resp.get("Functions", [])]
+    return safe_call(_, [])
+
+def list_eks():
+    def _():
+        resp = clients["eks"].list_clusters()
+        return resp.get("clusters", [])
+    return safe_call(_, [])
+
+def cost_last_6_months():
+    # returns DataFrame with last 6 months Total
+    def _():
+        ce = clients["ce"]
+        today = datetime.utcnow().date()
+        # build start = 6 months ago start-of-month
+        months = []
+        for i in range(6, 0, -1):
+            dt = (today.replace(day=1) - pd.DateOffset(months=i-1)).to_pydatetime().date()
+            months.append(dt)
+        # use start at (6 months back), end now
+        start = (today.replace(day=1) - pd.DateOffset(months=5)).strftime("%Y-%m-%d")
+        end = (today + pd.DateOffset(days=1)).strftime("%Y-%m-%d")
+        resp = ce.get_cost_and_usage(
+            TimePeriod={"Start": start, "End": end},
+            Granularity="MONTHLY",
+            Metrics=["UnblendedCost"],
+            GroupBy=[{"Type":"DIMENSION", "Key":"SERVICE"}]
+        )
+        # Build month totals
+        results = resp.get("ResultsByTime", [])
+        months=[]
+        totals=[]
+        for r in results:
+            months.append(r["TimePeriod"]["Start"])
+            totals.append(float(r["Total"]["UnblendedCost"]["Amount"]))
+        df = pd.DataFrame({"Month": months, "Total": totals})
+        # nicer month names
+        df["Month"] = pd.to_datetime(df["Month"]).dt.strftime("%b %Y")
+        return df
+    return safe_call(_, pd.DataFrame({"Month":[],"Total":[]}))
+
+# ----------------------------
+# Chat / intent processing
+# ----------------------------
+def detect_active_services():
+    active=[]
+    if list_ec2(): active.append("EC2")
+    if list_s3(): active.append("S3")
+    if list_rds(): active.append("RDS")
+    if list_lambda(): active.append("Lambda")
+    if list_eks(): active.append("EKS")
+    return active
+
+def process_user_query(q: str):
+    ql = q.lower().strip()
+    # Intent routing
+    if any(k in ql for k in ["which services", "what services", "services am i using", "what am i using"]):
+        active = detect_active_services()
+        if active:
+            return "✅ You are currently using these AWS services: " + ", ".join(active)
+        else:
+            return "No active AWS services detected."
+
+    if "ec2" in ql and any(k in ql for k in ["idle","unused","stopped","running","list","show","how many"]):
+        inst = list_ec2()
+        if not inst:
+            return "No EC2 instances found."
+        # if user asked for idle -> show non-running
+        if any(k in ql for k in ["idle","unused","stopped"]):
+            idle = [f"{i['id']} ({i['type']}) - {i['state']}" for i in inst if i["state"]!="running"]
+            return ("No idle EC2 instances found." if not idle else "Idle / non-running EC2 instances:\n" + "\n".join(idle))
+        if "running" in ql:
+            run = [f"{i['id']} ({i['type']})" for i in inst if i["state"]=="running"]
+            return ("No running EC2 instances found." if not run else "Running EC2 instances:\n" + "\n".join(run))
+        # default list
+        return "\n".join([f"{i['id']} ({i['type']}) - {i['state']}" for i in inst])
+
+    if "s3" in ql or "bucket" in ql:
+        buckets = list_s3()
+        return ("No S3 buckets found." if not buckets else "S3 buckets:\n" + "\n".join(buckets))
+
+    if "rds" in ql or "database" in ql:
+        dbs = list_rds()
+        return ("No RDS DB instances found." if not dbs else "RDS instances:\n" + "\n".join(dbs))
+
+    if "lambda" in ql or "function" in ql:
+        funcs = list_lambda()
+        return ("No Lambda functions found." if not funcs else "Lambda functions:\n" + "\n".join(funcs))
+
+    if "eks" in ql or "kubernetes" in ql:
+        clusters = list_eks()
+        return ("No EKS clusters found." if not clusters else "EKS clusters:\n" + "\n".join(clusters))
+
+    if any(k in ql for k in ["bill","cost","spend","charges","how much"]):
+        # Last month's cost quick call
+        try:
+            df = cost_last_6_months()
+            if df.empty:
+                return "Cost data not available yet (Cost Explorer needs historical data enabled)."
+            total = df["Total"].sum() if not df.empty else 0.0
+            # top service (call CE grouped by service for last month)
+            # simple: use latest month groups from CE already returned earlier; but to keep fast, return last month total
+            last_month_val = df["Total"].iloc[-1] if not df.empty else 0.0
+            return f"💰 Approx. cost in last month: ${last_month_val:.2f}\n(Shown trend for last {len(df)} months.)"
+        except Exception as e:
+            return f"⚠️ Unable to fetch cost data: {e}"
+
+    # fallback to LLM to interpret / suggest
+    try:
+        res = llm.invoke([SystemMessage(content="You are an AWS cloud optimization assistant."), HumanMessage(content=q)])
+        # Some wrappers return object, handle both
+        content = getattr(res, "content", None) or str(res)
+        return content
+    except Exception as e:
+        return f"⚠️ LLM error: {e}"
+
+# ----------------------------
+# Sidebar navigation
+# ----------------------------
+st.sidebar.markdown("## Navigation")
+page = st.sidebar.radio("", ["Home", "AI Assistant", "Cloud Inventory", "Cost Insights", "Recommendations"])
+
+# ----------------------------
+# Page: Home (summary + cards)
+# ----------------------------
+if page == "Home":
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.markdown("<h2>Overview</h2>", unsafe_allow_html=True)
+    st.markdown("<div class='small-muted'>Live AWS metrics and intelligent recommendations — dark mode</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # metrics
+    ec2_list = list_ec2()
+    s3_list = list_s3()
+    rds_list = list_rds()
+    lambda_list = list_lambda()
+    eks_list = list_eks()
+    cost_df = cost_last_6_months()
+
+    st.markdown("<div class='metrics-row'>", unsafe_allow_html=True)
+    st.markdown(f"<div class='metric card'><h3>EC2 Instances</h3><div style='font-size:24px'>{len(ec2_list)}</div><div class='small-muted'>Running/Total visible</div></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='metric card'><h3>S3 Buckets</h3><div style='font-size:24px'>{len(s3_list)}</div><div class='small-muted'>Storage objects</div></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='metric card'><h3>RDS</h3><div style='font-size:24px'>{len(rds_list)}</div><div class='small-muted'>Managed DBs</div></div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+
+    col1, col2 = st.columns([2,1])
+    with col1:
+        st.markdown("<div class='card'><h3>Cost Trend (last 6 months)</h3>", unsafe_allow_html=True)
+        if cost_df.empty:
+            st.info("Cost Explorer data not available or not enabled yet.")
+        else:
+            fig = px.line(cost_df, x="Month", y="Total", markers=True, title="Monthly cost")
+            fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#e6eef8")
+            st.plotly_chart(fig, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with col2:
+        st.markdown("<div class='card'><h3>Quick Insights</h3>", unsafe_allow_html=True)
+        active = detect_active_services()
+        if active:
+            st.success("You are currently using: " + ", ".join(active))
+        else:
+            st.info("No active services detected or insufficient permissions.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+# ----------------------------
+# Page: AI Assistant (chat)
+# ----------------------------
+elif page == "AI Assistant":
+    st.markdown("<div class='card'><h2>AI Assistant</h2><div class='small-muted'>Ask your cloud in plain English — e.g., 'What is my bill this month?' or 'Show idle EC2 instances'.</div></div>", unsafe_allow_html=True)
+
+    if "history" not in st.session_state:
+        st.session_state.history = []
+
+    # Left column: chat; Right column: quick actions
+    left, right = st.columns([3,1])
+
+    with left:
+        # Chat container (reverse order)
+        st.markdown("<div class='chat-wrap chat-container'>", unsafe_allow_html=True)
+        for role, text in list(reversed(st.session_state.history)):
+            if role == "user":
+                st.markdown(f"<div class='user-bubble'>{st.markdown(text, unsafe_allow_html=True) or text}</div>", unsafe_allow_html=True)
+            else:
+                # AI bubble uses typing animation (simple)
+                st.markdown(f"<div class='ai-bubble'>{text}</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        prompt = st.text_input("Ask the AI about your AWS account", key="prompt_input")
+        col_a, col_b = st.columns([1,1])
+        with col_a:
+            if st.button("Send"):
+                if prompt and prompt.strip():
+                    st.session_state.history.append(("user", prompt))
+                    # process
+                    with st.spinner("Analyzing..."):
+                        answer = process_user_query(prompt)
+                        # store and display
+                        st.session_state.history.append(("ai", answer))
+                    # clear input
+                    st.session_state.prompt_input = ""
+
+        with col_b:
+            if st.button("Clear Chat"):
+                st.session_state.history = []
+
+    with right:
+        st.markdown("<div class='card'><h4>Quick Actions</h4></div>", unsafe_allow_html=True)
+        if st.button("List EC2"):
+            st.session_state.history.append(("user","List EC2 instances"))
+            st.session_state.history.append(("ai", "\n".join([f'{i["id"]} ({i["type"]}) - {i["state"]}' for i in list_ec2()]) or "No EC2 instances"))
+        if st.button("List S3"):
+            st.session_state.history.append(("user","List S3 buckets"))
+            st.session_state.history.append(("ai", "\n".join(list_s3()) or "No S3 buckets"))
+        if st.button("Show Cost Trend"):
+            st.session_state.history.append(("user","Show cost trend"))
+            df = cost_last_6_months()
+            if df.empty:
+                st.session_state.history.append(("ai","Cost Explorer data not available."))
+            else:
+                st.session_state.history.append(("ai", "Displayed cost trend on Dashboard (go to Home)."))
+
+# ----------------------------
+# Page: Cloud Inventory
+# ----------------------------
+elif page == "Cloud Inventory":
+    st.markdown("<div class='card'><h2>Cloud Inventory</h2></div>", unsafe_allow_html=True)
+    st.markdown("**EC2 Instances**", unsafe_allow_html=True)
+    ec2s = list_ec2()
+    if ec2s:
+        st.table(pd.DataFrame(ec2s))
+    else:
+        st.info("No EC2 instances.")
+
+    st.markdown("**S3 Buckets**")
+    s3s = list_s3()
+    st.write(s3s or "No S3 buckets")
+
+    st.markdown("**RDS Instances**")
+    rds = list_rds()
+    st.write(rds or "No RDS instances")
+
+# ----------------------------
+# Page: Cost Insights
+# ----------------------------
+elif page == "Cost Insights":
+    st.markdown("<div class='card'><h2>Cost Insights</h2></div>", unsafe_allow_html=True)
+    df = cost_last_6_months()
+    if df.empty:
+        st.info("No cost data available (Cost Explorer may not be enabled or has insufficient history).")
+    else:
+        fig = px.bar(df, x="Month", y="Total", title="Monthly Spend")
+        fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#e6eef8")
+        st.plotly_chart(fig, use_container_width=True)
+        st.markdown(f"**Last month spend:** ${df['Total'].iloc[-1]:.2f}")
+
+# ----------------------------
+# Page: Recommendations (simple)
+# ----------------------------
+else:
+    st.markdown("<div class='card'><h2>Recommendations</h2></div>", unsafe_allow_html=True)
+    # Simple rules-based suggestions
+    ec2s = list_ec2()
+    idle = [i for i in ec2s if i.get("state")!="running"]
+    if idle:
+        st.warning(f"Found {len(idle)} non-running EC2 instances. Consider stopping/terminating or scheduling them.")
+    else:
+        st.success("No obvious idle EC2 instances found (by state). Consider analyzing CPU metrics for fine-grained idle detection.")
+    # EBS / S3 checks placeholder
+    st.info("For EBS and S3 deep analysis (unattached volumes, storage lifecycle), enable additional scanning.")
