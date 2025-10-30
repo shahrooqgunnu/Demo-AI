@@ -1,4 +1,4 @@
-# app.py — Agentic AI for AWS (Light ChatGPT Style UI + Extended Services)
+# app.py — Agentic AI for AWS (with color-coded EC2 state display)
 
 import os
 import pandas as pd
@@ -96,15 +96,38 @@ def safe_call(fn, default=None):
     except Exception as e:
         return default if default is not None else f"⚠️ {e}"
 
-def list_ec2():
+def list_ec2_details():
+    """Return detailed EC2 info (ID, Name, Type, State, LaunchTime)."""
     def _():
         res = clients["ec2"].describe_instances()
-        return [
-            i["InstanceId"]
-            for r in res.get("Reservations", [])
-            for i in r.get("Instances", [])
-        ]
-    return safe_call(_, [])
+        data = []
+        for r in res.get("Reservations", []):
+            for i in r.get("Instances", []):
+                name_tag = next((t["Value"] for t in i.get("Tags", []) if t["Key"] == "Name"), "N/A")
+                data.append({
+                    "Instance ID": i["InstanceId"],
+                    "Name": name_tag,
+                    "Type": i["InstanceType"],
+                    "State": i["State"]["Name"],
+                    "Launch Time": i["LaunchTime"].strftime("%Y-%m-%d %H:%M:%S")
+                })
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df["State"] = df["State"].apply(color_state)
+        return df
+    return safe_call(_, pd.DataFrame())
+
+def color_state(state):
+    """Return HTML colored label for EC2 state."""
+    colors = {
+        "running": "#16a34a",   # green
+        "stopped": "#dc2626",   # red
+        "pending": "#facc15",   # yellow
+        "shutting-down": "#f97316",
+        "terminated": "#6b7280"
+    }
+    color = colors.get(state.lower(), "#9ca3af")
+    return f'<b style="color:{color}">{state.capitalize()}</b>'
 
 def list_s3():
     def _():
@@ -118,39 +141,6 @@ def list_lambda():
         return [f["FunctionName"] for f in res.get("Functions", [])]
     return safe_call(_, [])
 
-def list_rds():
-    def _():
-        res = clients["rds"].describe_db_instances()
-        return [
-            {
-                "DBInstanceIdentifier": db["DBInstanceIdentifier"],
-                "Engine": db["Engine"],
-                "Status": db["DBInstanceStatus"],
-                "Endpoint": db.get("Endpoint", {}).get("Address", "N/A")
-            }
-            for db in res.get("DBInstances", [])
-        ]
-    return safe_call(_, [])
-
-def list_dynamodb():
-    def _():
-        res = clients["dynamodb"].list_tables()
-        return res.get("TableNames", [])
-    return safe_call(_, [])
-
-def list_ecr():
-    def _():
-        res = clients["ecr"].describe_repositories()
-        return [r["repositoryName"] for r in res.get("repositories", [])]
-    return safe_call(_, [])
-
-def list_iam_users():
-    def _():
-        res = clients["iam"].list_users()
-        return [u["UserName"] for u in res.get("Users", [])]
-    return safe_call(_, [])
-
-# ---------------------- COST DATA ----------------------
 def get_monthly_costs(months=6):
     ce = clients["ce"]
     today = datetime.utcnow().date()
@@ -169,98 +159,46 @@ def get_monthly_costs(months=6):
     df["Month"] = pd.to_datetime(df["Month"]).dt.strftime("%b %Y")
     return df
 
-def get_service_costs():
-    ce = clients["ce"]
-    today = datetime.utcnow().date()
-    start = pd.Timestamp(today).replace(day=1).strftime("%Y-%m-%d")
-    end = (today + pd.DateOffset(days=1)).strftime("%Y-%m-%d")
-    resp = ce.get_cost_and_usage(
-        TimePeriod={"Start": start, "End": end},
-        Granularity="MONTHLY",
-        Metrics=["UnblendedCost"],
-        GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}]
-    )
-    services, costs = [], []
-    for group in resp["ResultsByTime"][0]["Groups"]:
-        services.append(group["Keys"][0])
-        costs.append(float(group["Metrics"]["UnblendedCost"]["Amount"]))
-    df = pd.DataFrame({"Service": services, "Cost": costs})
-    df = df[df["Cost"] > 0].sort_values(by="Cost", ascending=False)
-    return df
-
 # ---------------------- SMART QUERY HANDLER ----------------------
 def process_query(q: str):
     ql = q.lower()
 
-    # ---------- AWS DATA QUERIES ----------
-    if "ec2" in ql and any(w in ql for w in ["list", "show", "running", "instances"]):
-        ec2s = list_ec2()
-        return f"🖥️ **EC2 Instances ({len(ec2s)})**:\n" + ("\n".join(ec2s) if ec2s else "No EC2 instances running.")
+    # EC2 Smart Filtering
+    if "ec2" in ql and any(w in ql for w in ["list", "show", "instances", "running", "stopped"]):
+        df = list_ec2_details()
+        if df.empty:
+            return "No EC2 instances found."
+
+        # Filter logic
+        if "running" in ql:
+            df = df[df["State"].str.contains("running", case=False, regex=True)]
+            title = "🟢 Running EC2 Instances"
+        elif "stopped" in ql:
+            df = df[df["State"].str.contains("stopped", case=False, regex=True)]
+            title = "🔴 Stopped EC2 Instances"
+        else:
+            title = "🖥️ All EC2 Instances"
+
+        if df.empty:
+            return f"No {title.lower()} found."
+
+        st.markdown(f"### {title}")
+        st.markdown(df.to_html(escape=False, index=False), unsafe_allow_html=True)
+        return f"✅ {title} displayed with color indicators."
 
     elif "s3" in ql and any(w in ql for w in ["list", "show", "buckets"]):
         s3s = list_s3()
         return f"🪣 **S3 Buckets ({len(s3s)})**:\n" + ("\n".join(s3s) if s3s else "No S3 buckets found.")
 
-    elif "lambda" in ql and any(w in ql for w in ["list", "functions", "show"]):
-        lambdas = list_lambda()
-        return f"⚙️ **Lambda Functions ({len(lambdas)})**:\n" + ("\n".join(lambdas) if lambdas else "No Lambda functions deployed.")
-
     elif any(word in ql for word in ["cost", "bill", "spend", "charges", "pricing"]):
         df = get_monthly_costs()
-        df_service = get_service_costs()
-
         if not df.empty:
-            current = df["Cost"].iloc[-1]
-            previous = df["Cost"].iloc[-2] if len(df) > 1 else 0
-            diff = current - previous
-            trend = "📈 increased" if diff > 0 else "📉 decreased"
-            st.markdown(f"### 💰 AWS Cost Summary")
-            st.markdown(f"**Current Month:** ${current:.2f}  \n**Previous Month:** ${previous:.2f}  \n**Change:** {trend} by ${abs(diff):.2f}")
-
-        st.markdown("### 🧩 Service-wise Cost Breakdown")
-        st.plotly_chart(px.bar(df_service, x="Service", y="Cost", title="AWS Service Cost Breakdown"), use_container_width=True)
-
-        st.markdown("### 📊 Monthly Cost Trend")
-        st.plotly_chart(px.line(df, x="Month", y="Cost", markers=True, title="AWS Monthly Cost (6 Months)"), use_container_width=True)
+            st.plotly_chart(px.line(df, x="Month", y="Cost", markers=True, title="AWS Monthly Cost"), use_container_width=True)
         return ""
 
-    elif any(word in ql for word in ["list services", "using services", "active services", "which services"]):
-        ec2s, s3s, lambdas = list_ec2(), list_s3(), list_lambda()
-        summary = [
-            f"🖥️ EC2 Instances: {len(ec2s)}",
-            f"🪣 S3 Buckets: {len(s3s)}",
-            f"⚙️ Lambda Functions: {len(lambdas)}"
-        ]
-        return "### 🔍 Active AWS Services Summary\n" + "\n".join(summary)
-
-    # ---------- HOW-TO / SETUP QUESTIONS ----------
-    elif any(w in ql for w in ["how to", "create", "setup", "steps", "launch"]):
-        res = llm.invoke([
-            SystemMessage(content="""You are a friendly AWS assistant.
-Your job is to give **step-by-step**, beginner-friendly instructions for AWS tasks (like creating EC2, S3, Lambda, IAM users, etc.).
-Use clear markdown formatting, short paragraphs, and emojis.
-Example style:
-
-### 🧩 Steps to Create an S3 Bucket
-1. Go to AWS Console → Search for **S3**
-2. Click **Create Bucket**
-3. Enter a unique bucket name
-4. Choose region
-5. Leave defaults or enable versioning if needed
-6. Click **Create bucket**
-
-💡 Tip: You can also use AWS CLI:  
-```bash
-aws s3 mb s3://my-new-bucket
-```"""),
-            HumanMessage(content=q)
-        ])
-        return res.content
-
-    # ---------- DEFAULT (GENERAL CHAT) ----------
     else:
         res = llm.invoke([
-            SystemMessage(content="You are an AWS + Cloud expert assistant that can explain, troubleshoot, and guide users using AWS best practices."),
+            SystemMessage(content="You are an AWS expert assistant that explains and helps manage AWS resources."),
             HumanMessage(content=q)
         ])
         return res.content
@@ -273,37 +211,28 @@ page = st.sidebar.radio("Navigation", ["🏠 Home", "💬 Chat Assistant", "📊
 if page == "🏠 Home":
     st.title("🏠 AWS Overview Dashboard")
 
-    ec2s, s3s, lambdas = list_ec2(), list_s3(), list_lambda()
+    df_ec2 = list_ec2_details()
+    s3s, lambdas = list_s3(), list_lambda()
     df_cost = get_monthly_costs()
 
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("EC2 Instances", len(ec2s))
+        st.metric("EC2 Instances", len(df_ec2))
         st.metric("S3 Buckets", len(s3s))
         st.metric("Lambda Functions", len(lambdas))
     with col2:
         if not df_cost.empty:
             st.metric("Current Month Cost ($)", round(df_cost["Cost"].iloc[-1], 2))
-            if len(df_cost) > 1:
-                st.metric("Previous Month Cost ($)", round(df_cost["Cost"].iloc[-2], 2))
 
-    st.markdown("### 📊 Resource Usage Overview")
-    df_usage = pd.DataFrame({
-        "Service": ["EC2", "S3", "Lambda"],
-        "Count": [len(ec2s), len(s3s), len(lambdas)]
-    })
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.plotly_chart(px.bar(df_usage, x="Service", y="Count", title="AWS Resources Count"), use_container_width=True)
-    with c2:
-        st.plotly_chart(px.pie(df_usage, names="Service", values="Count", title="AWS Resource Distribution"), use_container_width=True)
+    st.markdown("### 🖥️ EC2 Instance Status")
+    if not df_ec2.empty:
+        st.markdown(df_ec2.to_html(escape=False, index=False), unsafe_allow_html=True)
+    else:
+        st.info("No EC2 instances found.")
 
     st.markdown("### 💵 Monthly Cost Trend")
     if not df_cost.empty:
-        st.plotly_chart(px.line(df_cost, x="Month", y="Cost", markers=True, title="AWS Cost (Last 6 Months)"), use_container_width=True)
-    else:
-        st.info("No cost data available.")
+        st.plotly_chart(px.line(df_cost, x="Month", y="Cost", markers=True, title="AWS Cost (6 Months)"), use_container_width=True)
 
 # ---------------------- CHAT ----------------------
 elif page == "💬 Chat Assistant":
