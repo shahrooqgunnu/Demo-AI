@@ -338,6 +338,55 @@ def estimate_service_costs(total_cost: float | None = None):
 # ---------------------- SMART QUERY PROCESSOR ----------------------
 def process_query(q: str):
     ql = q.lower().strip()
+
+    # helper: detect creation/provisioning intent
+    def is_creation_intent(text: str) -> bool:
+        creation_verbs = ["create", "launch", "provision", "spin up", "how to create", "how do i create", "setup", "set up", "step", "steps", "deploy", "start instance"]
+        return any(verb in text for verb in creation_verbs)
+
+    # helper: resource keywords mapping
+    def has_resource_keyword(text: str, keywords: list) -> bool:
+        return any(k in text for k in keywords)
+
+    # If the user asks about creating / launching / provisioning a resource, prefer LLM instructions
+    # to avoid accidentally returning a list of existing resources.
+    if is_creation_intent(ql):
+        # Check common resources: EC2, RDS, S3, EKS, Lambda, ECR, CloudFront, DynamoDB
+        resource_map = {
+            "ec2": ["ec2", "instance", "ec2 instance", "ec2 instances"],
+            "rds": ["rds", "relational database", "rds instance"],
+            "s3": ["s3", "bucket", "s3 bucket"],
+            "eks": ["eks", "kubernetes", "eks cluster", "k8s"],
+            "lambda": ["lambda", "aws lambda", "function"],
+            "ecr": ["ecr", "container registry", "docker registry"],
+            "cloudfront": ["cloudfront", "cdn"],
+            "dynamodb": ["dynamodb", "dynamo", "nosql", "table"]
+        }
+        for svc, keys in resource_map.items():
+            if has_resource_keyword(ql, keys):
+                # Ask LLM to provide step-by-step instructions for creating the resource.
+                try:
+                    prompt_system = SystemMessage(content="You are an AWS instructor. Provide safe, step-by-step instructions (CLI, console, and Terraform examples when possible) to create the requested AWS resource. Do NOT run anything — only provide instructions.")
+                    prompt_user = HumanMessage(content=f"{q}. Please include: (1) console steps, (2) AWS CLI example, (3) a short Terraform snippet (if applicable), and (4) security/permissions notes.")
+                    resp = llm.invoke([prompt_system, prompt_user])
+                    content = getattr(resp, "content", None) or str(resp)
+                    st.markdown("### 🛠️ Provisioning Instructions (LLM)")
+                    st.markdown(content)
+                    return content
+                except Exception as e:
+                    return f"⚠️ LLM error while generating instructions: {e}"
+        # If creation intent but no specific resource detected, ask LLM generally
+        try:
+            prompt_system = SystemMessage(content="You are an AWS instructor. Provide safe, step-by-step instructions for provisioning resources. Provide console/CLI/Terraform examples when helpful.")
+            prompt_user = HumanMessage(content=q)
+            resp = llm.invoke([prompt_system, prompt_user])
+            content = getattr(resp, "content", None) or str(resp)
+            st.markdown("### 🛠️ Provisioning Instructions (LLM)")
+            st.markdown(content)
+            return content
+        except Exception as e:
+            return f"⚠️ LLM error while generating instructions: {e}"
+
     # quick mapping
     if any(k in ql for k in ["which services", "active services", "currently using", "what services"]):
         # gather counts and creation/launch info + last month cost per service
