@@ -262,7 +262,10 @@ def get_service_costs_for_month(target_date=None):
             Metrics=["UnblendedCost"],
             GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}]
         )
-        groups = resp.get("ResultsByTime", [])[0].get("Groups", [])
+        results = resp.get("ResultsByTime", [])
+        if not results:
+            return pd.DataFrame()
+        groups = results[0].get("Groups", [])
         rows = []
         for g in groups:
             svc = g.get("Keys", [None])[0]
@@ -271,6 +274,66 @@ def get_service_costs_for_month(target_date=None):
         df = pd.DataFrame(rows).sort_values("Cost", ascending=False)
         return df
     return safe_call(_, pd.DataFrame())
+
+# ---------------------- NEW: ESTIMATOR ----------------------
+def estimate_service_costs(total_cost: float | None = None):
+    """
+    Estimate service costs using simple per-resource unit rates and counts.
+    If total_cost provided and >0, scale the totals to match it.
+    """
+    # gather counts
+    ec2 = list_ec2_details()
+    s3 = list_s3_details()
+    rds = list_rds_details()
+    eks = list_eks_clusters()
+    lamb = list_lambda_details()
+    ecr = list_ecr_repos()
+    cf = list_cloudfront()
+    ddb = list_dynamodb_tables()
+    iam = list_iam_users()
+
+    counts = {
+        "EC2": len(ec2),
+        "S3": len(s3),
+        "RDS": len(rds),
+        "EKS": len(eks),
+        "Lambda": len(lamb),
+        "ECR": len(ecr),
+        "CloudFront": len(cf),
+        "DynamoDB": len(ddb),
+        "IAM Users": len(iam)
+    }
+
+    # basic per-unit monthly rates (very rough heuristics for demo)
+    rates = {
+        "EC2": 30.0,        # $/instance-month
+        "S3": 1.0,          # $/bucket-month (placeholder; actual depends on bytes stored)
+        "RDS": 80.0,        # $/db-month
+        "EKS": 40.0,        # $/cluster-month
+        "Lambda": 3.0,      # $/function-month (placeholder)
+        "ECR": 2.0,         # $/repo-month
+        "CloudFront": 5.0,  # $/distribution-month (placeholder)
+        "DynamoDB": 10.0,   # $/table-month (placeholder)
+        "IAM Users": 0.2    # $/user-month (very small)
+    }
+
+    rows = []
+    for svc, cnt in counts.items():
+        est = rates.get(svc, 1.0) * max(cnt, 0)
+        rows.append({"Service": svc, "Count": cnt, "EstimatedCost": est})
+    est_df = pd.DataFrame(rows).sort_values("EstimatedCost", ascending=False).reset_index(drop=True)
+
+    # scale to match total_cost if provided and > 0
+    if total_cost and total_cost > 0 and not est_df.empty:
+        total_est = est_df["EstimatedCost"].sum()
+        if total_est > 0:
+            est_df["EstimatedCostScaled"] = est_df["EstimatedCost"] * (total_cost / total_est)
+        else:
+            est_df["EstimatedCostScaled"] = est_df["EstimatedCost"]
+    else:
+        est_df["EstimatedCostScaled"] = est_df["EstimatedCost"]
+
+    return est_df
 
 # ---------------------- SMART QUERY PROCESSOR ----------------------
 def process_query(q: str):
@@ -366,12 +429,54 @@ def process_query(q: str):
 
         # show bar / pie of costs for only services with cost > 0
         cost_df = get_service_costs_for_month()
+        # --- NEW: estimated costs scaled to last-month total if we have monthly total ---
+        monthly = get_monthly_costs()
+        last_month_total = monthly["Cost"].iloc[-1] if (not monthly.empty) else None
+        est_df = estimate_service_costs(total_cost=last_month_total)
+
         if not cost_df.empty:
-            st.markdown("### 🧾 Last Month Cost by Service")
+            st.markdown("### 🧾 Last Month Cost by Service (Cost Explorer)")
             st.plotly_chart(px.bar(cost_df, x="Service", y="Cost", title="Service cost (last month)", text_auto=True), use_container_width=True)
             st.plotly_chart(px.pie(cost_df.head(10), names="Service", values="Cost", title="Top services by cost (last month)"), use_container_width=True)
         else:
-            st.info("No service cost data available for the last month (Cost Explorer may be off / permission missing).")
+            st.info("No service cost data available from Cost Explorer for the last month (Cost Explorer may be off / permission missing).")
+
+        # show estimated breakdown and compare
+        st.markdown("### 🔮 Estimated Service Cost (heuristic) — scaled to total if available")
+        est_display = est_df[["Service", "Count", "EstimatedCost", "EstimatedCostScaled"]].rename(columns={"EstimatedCostScaled":"EstimatedScaled"})
+        st.dataframe(est_display, use_container_width=True)
+
+        # comparison table
+        if not cost_df.empty:
+            # prepare comparison
+            merged = pd.merge(cost_df, est_df[["Service", "EstimatedCostScaled"]], on="Service", how="outer").fillna(0)
+            merged = merged.rename(columns={"Cost":"CE_Cost", "EstimatedCostScaled":"Est_Cost"})
+            merged["Diff"] = merged["CE_Cost"] - merged["Est_Cost"]
+            merged = merged.sort_values("CE_Cost", ascending=False).reset_index(drop=True)
+            st.markdown("### ⚖️ CE vs Estimated (last month)")
+            st.dataframe(merged.head(30), use_container_width=True)
+
+        # AI quick insights (small)
+        insight_lines = []
+        if not cost_df.empty:
+            top = cost_df.head(3)
+            insight_lines.append(f"Top services by CE cost: {', '.join(top['Service'].tolist())}.")
+        if last_month_total:
+            insight_lines.append(f"Total billed last month: ${last_month_total:.2f}.")
+        # some simple heuristic suggestions
+        if len(ec2) > 0:
+            idle_ec2 = ec2[ec2["State"].str.contains("stopped", case=False, na=False)]
+            if not idle_ec2.empty:
+                insight_lines.append(f"Found {len(idle_ec2)} stopped EC2 instances — consider terminating or scheduling them.")
+        if len(rds) > 0:
+            insight_lines.append("Check RDS backups and right-sizing for RDS instances to optimize costs.")
+        if not cost_df.empty and est_df["EstimatedCostScaled"].sum() > 0:
+            insight_lines.append("Compare CE and estimates to find tracking gaps (e.g., third-party charges, data transfer).")
+
+        if insight_lines:
+            st.markdown("#### 🧠 Quick Insights & Suggestions")
+            for l in insight_lines:
+                st.markdown(f"- {l}")
 
         return "✅ Active services summary displayed above."
 
@@ -469,8 +574,32 @@ def process_query(q: str):
 
     # Cost explorer general
     if any(k in ql for k in ["cost", "spend", "bill", "charges"]):
+        # if user asks specific "this month" or "current month", show numeric
         df_monthly = get_monthly_costs()
         svc_costs = get_service_costs_for_month()
+        # numeric quick reply for "this month"
+        if "this month" in ql or "current month" in ql or "this month's" in ql:
+            if not df_monthly.empty:
+                current = df_monthly["Cost"].iloc[-1]
+                st.markdown(f"### 💰 Current month (approx): **${current:.2f}**")
+            else:
+                st.info("No monthly cost data available (Cost Explorer may be off).")
+
+            # show breakdowns (both CE and estimated)
+            if not svc_costs.empty:
+                st.markdown("#### 🧾 Cost Explorer: service breakdown (current month)")
+                st.plotly_chart(px.bar(svc_costs.head(12), x="Service", y="Cost", title="Service costs (current month)", text_auto=True), use_container_width=True)
+            else:
+                st.info("No service breakdown available via Cost Explorer.")
+
+            # show estimated breakdown scaled to current month total if available
+            total_now = df_monthly["Cost"].iloc[-1] if (not df_monthly.empty) else None
+            est_now = estimate_service_costs(total_cost=total_now)
+            st.markdown("#### 🔮 Estimated costs (heuristic)")
+            st.dataframe(est_now[["Service", "Count", "EstimatedCostScaled"]].rename(columns={"EstimatedCostScaled":"Estimated($)"}), use_container_width=True)
+            return "✅ Shown current month cost & breakdowns."
+
+        # default cost view
         if not df_monthly.empty:
             st.markdown("### 💵 Monthly Cost Trend")
             st.plotly_chart(px.line(df_monthly, x="Month", y="Cost", markers=True, title="AWS Monthly Cost (last months)"), use_container_width=True)
@@ -560,12 +689,41 @@ if page == "🏠 Home":
     st.markdown("### 💵 Cost Visualizations")
     if not df_cost.empty:
         st.plotly_chart(px.line(df_cost, x="Month", y="Cost", markers=True, title="AWS Monthly Cost (6 months)"), use_container_width=True)
+
+    # --- ADDED: show both CE service costs and heuristic estimates side-by-side ---
     svc_costs = get_service_costs_for_month()
-    if not svc_costs.empty:
-        st.plotly_chart(px.bar(svc_costs.head(12), x="Service", y="Cost", title="Service cost (current month)", text_auto=True), use_container_width=True)
-        st.plotly_chart(px.pie(svc_costs.head(10), names="Service", values="Cost", title="Top services by cost (current month)"), use_container_width=True)
+    # estimated (scaled to current month if available)
+    total_current = df_cost["Cost"].iloc[-1] if (not df_cost.empty) else None
+    est = estimate_service_costs(total_cost=total_current)
+
+    st.markdown("### 🔀 Service Cost — Actual (Cost Explorer) vs Estimated (heuristic)")
+    cols = st.columns(2)
+    with cols[0]:
+        st.markdown("#### 🧾 Cost Explorer (this month)")
+        if not svc_costs.empty:
+            st.plotly_chart(px.bar(svc_costs.head(12), x="Service", y="Cost", title="CE: Service cost (current month)", text_auto=True), use_container_width=True)
+            st.plotly_chart(px.pie(svc_costs.head(8), names="Service", values="Cost", title="CE: Top services (current month)"), use_container_width=True)
+        else:
+            st.info("No Cost Explorer service data available (permission or CE not enabled).")
+
+    with cols[1]:
+        st.markdown("#### 🔮 Estimated breakdown (heuristic)")
+        if not est.empty:
+            st.plotly_chart(px.bar(est, x="Service", y="EstimatedCostScaled", title="Estimated service cost (scaled)", text_auto=True), use_container_width=True)
+            st.plotly_chart(px.pie(est.head(8), names="Service", values="EstimatedCostScaled", title="Estimated: Top services"), use_container_width=True)
+            st.dataframe(est[["Service", "Count", "EstimatedCost", "EstimatedCostScaled"]].rename(columns={"EstimatedCostScaled":"EstimatedScaled($)"}), use_container_width=True)
+        else:
+            st.info("Estimates not available.")
+
+    # comparison (if CE data present)
+    if not svc_costs.empty and not est.empty:
+        merged = pd.merge(svc_costs, est[["Service", "EstimatedCostScaled"]], on="Service", how="outer").fillna(0)
+        merged = merged.rename(columns={"Cost":"CE_Cost", "EstimatedCostScaled":"Est_Cost"})
+        merged["Diff"] = merged["CE_Cost"] - merged["Est_Cost"]
+        st.markdown("#### ⚖️ CE vs Estimate (this month)")
+        st.dataframe(merged.sort_values("CE_Cost", ascending=False).head(30), use_container_width=True)
     else:
-        st.info("No service cost breakdown available (Cost Explorer may not be enabled or you lack permission).")
+        st.info("Comparison table not available (missing CE or estimate data).")
 
 # ---------------------- CHAT ASSISTANT ----------------------
 elif page == "💬 Chat Assistant":
